@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 /*
- * LD_PRELOAD для клиентов 1С под X11 (XWayland, тайловые WM): обходы двух
+ * LD_PRELOAD для клиентов 1С под X11 (XWayland, тайловые WM): обходы
  * дефектов окон на wxWidgets — Конфигуратора и толстого клиента. Тонкий
  * клиент ими не страдает, но библиотека ему не мешает.
  *
@@ -20,10 +20,18 @@
  *    же спрятано, а 1С показала новое окно или получила ввод, спрятанные
  *    окна возвращаются.
  *
+ * 3. Пустое окно рядом с диалогом. Модальному диалогу 1С назначает
+ *    родителя — невидимый диалог 1×1 (min = max = 1×1, без рамки). Hyprland
+ *    подсказки размера такого окна не учитывает и показывает его 800×800.
+ *    Перед показом такому окну ставится override-redirect: WM им не
+ *    управляет, и оно остаётся пикселем в углу, как задумано.
+ *
  * Отключить: ONEC_NO_X11_FIXES=1.
  */
 #define _GNU_SOURCE
 #include <X11/Xlib.h>
+#include <X11/Xatom.h>
+#include <X11/Xutil.h>
 #include <dlfcn.h>
 #include <errno.h>
 #include <pthread.h>
@@ -47,6 +55,15 @@ static int (*real_pthread_join)(pthread_t, void **);
 static int (*real_timedjoin)(pthread_t, void **, const struct timespec *);
 static int (*real_sem_wait)(sem_t *);
 static int (*real_sem_timedwait)(sem_t *, const struct timespec *);
+static int (*real_map_window)(Display *, Window);
+static Status (*real_get_normal_hints)(Display *, Window, XSizeHints *,
+                                       long *);
+static int (*real_get_property)(Display *, Window, Atom, long, long, Bool,
+                                Atom, Atom *, int *, unsigned long *,
+                                unsigned long *, unsigned char **);
+static int (*real_change_attributes)(Display *, Window, unsigned long,
+                                     XSetWindowAttributes *);
+static int (*real_free)(void *);
 
 static pthread_once_t once = PTHREAD_ONCE_INIT;
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
@@ -61,6 +78,11 @@ static void init(void) {
   real_timedjoin = dlsym(RTLD_NEXT, "pthread_timedjoin_np");
   real_sem_wait = dlsym(RTLD_NEXT, "sem_wait");
   real_sem_timedwait = dlsym(RTLD_NEXT, "sem_timedwait");
+  real_map_window = dlsym(RTLD_NEXT, "XMapWindow");
+  real_get_normal_hints = dlsym(RTLD_NEXT, "XGetWMNormalHints");
+  real_get_property = dlsym(RTLD_NEXT, "XGetWindowProperty");
+  real_change_attributes = dlsym(RTLD_NEXT, "XChangeWindowAttributes");
+  real_free = dlsym(RTLD_NEXT, "XFree");
   disabled = getenv("ONEC_NO_X11_FIXES") != NULL;
 }
 
@@ -217,6 +239,42 @@ static struct timespec deadline(int clock) {
   return ts;
 }
 
+/* --- 3. Невидимый родитель модальных диалогов -------------------------- */
+
+static int is_dialog(Display *dpy, Window w) {
+  Atom type = real_intern_atom(dpy, "_NET_WM_WINDOW_TYPE", True);
+  Atom dialog = real_intern_atom(dpy, "_NET_WM_WINDOW_TYPE_DIALOG", True);
+  if (!type || !dialog)
+    return 0;
+  Atom actual;
+  int format;
+  unsigned long n, after;
+  unsigned char *data = NULL;
+  int found = 0;
+  if (real_get_property(dpy, w, type, 0, 8, False, XA_ATOM, &actual, &format,
+                        &n, &after, &data) == Success &&
+      data && format == 32)
+    for (unsigned long i = 0; i < n; i++)
+      if (((Atom *)data)[i] == dialog)
+        found = 1;
+  if (data)
+    real_free(data);
+  return found;
+}
+
+static int is_modal_parent(Display *dpy, Window w) {
+  if (!real_get_normal_hints || !real_get_property || !real_intern_atom ||
+      !real_change_attributes || !real_free)
+    return 0;
+  XSizeHints hints;
+  long supplied;
+  if (!real_get_normal_hints(dpy, w, &hints, &supplied) ||
+      !(hints.flags & PMaxSize) || hints.max_width > 1 ||
+      hints.max_height > 1)
+    return 0;
+  return is_dialog(dpy, w);
+}
+
 /* --- Перехваты ----------------------------------------------------------- */
 
 int XNextEvent(Display *dpy, XEvent *ev) {
@@ -242,6 +300,15 @@ int XNextEvent(Display *dpy, XEvent *ev) {
   }
   pthread_mutex_unlock(&lock);
   return r;
+}
+
+int XMapWindow(Display *dpy, Window w) {
+  pthread_once(&once, init);
+  if (!disabled && is_modal_parent(dpy, w)) {
+    XSetWindowAttributes attrs = {.override_redirect = True};
+    real_change_attributes(dpy, w, CWOverrideRedirect, &attrs);
+  }
+  return real_map_window(dpy, w);
 }
 
 int nanosleep(const struct timespec *req, struct timespec *rem) {
