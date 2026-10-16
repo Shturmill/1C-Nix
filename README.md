@@ -38,7 +38,7 @@ onec-nix — Nix-пакет и NixOS-модуль для платформы «1�
    {
      inputs = {
        nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-       onec.url = "github:Shturmill/onec-nix";
+       onec.url = "github:Shturmill/1C-Nix";
        onec.inputs.nixpkgs.follows = "nixpkgs";
      };
 
@@ -132,6 +132,29 @@ services.onec = {
 };
 ```
 
+> **Безопасность.** По умолчанию `server.securityLevel = 0` (`-seclev 0`):
+> соединения с ragent не защищены — так было и раньше, поведение
+> существующих серверов не меняется. Для рабочего развёртывания рассмотрите
+> уровень 2 (защищено всё соединение; 1 — только аутентификация), проверьте,
+> что клиенты с ним работают, и не открывайте порты 1С шире, чем нужно:
+>
+> ```nix
+> server = {
+>   enable = true;
+>   securityLevel = 2;
+>   openFirewall = false;
+> };
+> ```
+
+RAS можно поднять и для сервера на другой машине:
+
+```nix
+services.onec.ras = {
+  enable = true;
+  agentAddress = "192.168.1.100:1540";   # по умолчанию localhost:<server.port>
+};
+```
+
 Нужные компоненты инсталлятора (`server`, `server_admin`, `client_full`)
 модуль добавляет сам. Свои — через `services.onec.components`; полный список
 печатается в логе сборки («onec: компоненты дистрибутива: …»).
@@ -159,7 +182,10 @@ onec.lib.mkOnec pkgs {
 | `language` | `"ru"` | язык интерфейса (добавляется в компоненты) |
 | `client.enable` / `client.fonts` | `false` / `true` | клиент в PATH, corefonts для печатных форм |
 | `client.scale` | `null` | масштаб интерфейса, дробный: `1.25` = 125 % (`ONEC_SCALE` — на один запуск) |
+| `client.x11Fixes.enable` | `true` | `LD_PRELOAD`-обходы дефектов окон под X11 (см. «Если не запускается») |
 | `server.*`, `ras.*` | выкл. | сервисы ragent и ras |
+| `server.securityLevel` | `0` | `-seclev` агента: 0 / 1 / 2 |
+| `ras.agentAddress` | `localhost:<server.port>` | агент, который обслуживает ras |
 | `linkToOpt` | `true` | `/opt/1cv8/x86_64/<версия>`, `common`, `conf/conf.cfg` (для 1cestart, EDT) |
 | `optName` | по имени файла | `"1cv8t"` — учебная версия |
 | `licensesDir.mode` / `.group` | `"2775"` / `grp1cv8` | права на `/var/1C/licenses` |
@@ -239,8 +265,10 @@ onec.lib.mkOnec pkgs {
   (`pkgs/onec/x11-fixes.c`): она делит такое событие на перемещение и
   изменение размера, прячет закрываемое окно, как только 1С перешла к
   завершению (если 1С спрашивает «Сохранить изменения?», окно остаётся), и
-  выводит невидимого родителя из-под управления WM. Бинарники не меняются;
-  отключить — `ONEC_NO_X11_FIXES=1`.
+  выводит невидимого родителя из-под управления WM. Бинарники не меняются.
+  Отключить на один запуск — `ONEC_NO_X11_FIXES=1 1cv8c` (библиотека тогда
+  не подгружается вовсе), насовсем — `services.onec.client.x11Fixes.enable
+  = false` (у `mkOnec` — `enableX11Fixes = false`).
 - **Клиент висит при старте без окна** — обычно нет шрифтов. Окружение
   подставляет свой `FONTCONFIG_FILE` (системная конфигурация + шрифты
   окружения); если вы задаёте `FONTCONFIG_FILE` сами, проверьте его.

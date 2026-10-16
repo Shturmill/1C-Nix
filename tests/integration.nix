@@ -18,56 +18,38 @@
 let
   t = pkgs.lib.optionalString (onec.optName == "1cv8t") "t";
 
-  # Шаги 2–5 идут в одном Xvfb. Каждый запуск 1С — в фоне с опросом: если
-  # процесс завис, в лог попадают состояния его потоков (wchan/syscall), а
-  # проверка падает, а не висит. В песочнице сборки такое зависание при
-  # старте 1cv8t изредка наблюдалось при прямом запуске из xvfb-run.
+  # Шаги 2–5 идут в одном Xvfb. Каждый запуск 1С — под timeout: зависший
+  # процесс роняет проверку, а не вешает её. В песочнице сборки такое
+  # зависание при старте 1cv8t изредка наблюдалось.
   steps = pkgs.writeShellScript "onec-integration-steps" ''
     set -eu
     PATH=${
       pkgs.lib.makeBinPath [
         pkgs.procps
         pkgs.coreutils
-        pkgs.gawk
       ]
     }:$PATH
 
-    dump() {
-      for p in $(pgrep -f "$1" || true); do
-        echo "== pid $p: $(tr '\0' ' ' < /proc/$p/cmdline | cut -c1-120)"
-        for th in /proc/$p/task/*; do
-          echo "  $(cat $th/comm) $(awk '/^State/{print $2}' $th/status) wchan=$(cat $th/wchan) syscall=$(cut -d' ' -f1 $th/syscall)"
-        done
-      done >&2
-    }
-
     # run <метка> <секунд> <ожидание: exit|alive> <команда…>
+    # exit — процесс должен сам завершиться с кодом 0 за <секунд>;
+    # alive — должен проработать все <секунд> (timeout вернёт 124, или 137,
+    # если на TERM не ответил и добит KILL). Это проверка «не упал», а не
+    # «GUI отвечает».
     run() {
       tag=$1 limit=$2 expect=$3; shift 3
-      "$@" < /dev/null > "$TMPDIR/$tag.out" 2>&1 &
-      pid=$!
-      for _ in $(seq "$limit"); do
-        kill -0 "$pid" 2>/dev/null || break
-        sleep 1
-      done
-      if kill -0 "$pid" 2>/dev/null; then
-        if [ "$expect" = alive ]; then
-          kill "$pid" 2>/dev/null || true; pkill -f "$TMPDIR/ib" || true
-          wait "$pid" || true
-          return 0
-        fi
-        echo "$tag: не завершился за $limit с" >&2
-        dump "$TMPDIR/ib"
-        cat "$TMPDIR/$tag.out" >&2
-        pkill -f "$TMPDIR/ib" || true
-        return 1
-      fi
-      rc=0; wait "$pid" || rc=$?
-      if [ "$expect" = alive ] && [ "$rc" != 0 ]; then
-        echo "$tag: завершился с кодом $rc" >&2
-        cat "$TMPDIR/$tag.out" >&2
-        return 1
-      fi
+      rc=0
+      timeout --signal=TERM --kill-after=3s "''${limit}s" "$@" \
+        < /dev/null > "$TMPDIR/$tag.out" 2>&1 || rc=$?
+      pkill -f "$TMPDIR/ib" || true
+      case "$expect:$rc" in
+        exit:0 | alive:124 | alive:137) return 0 ;;
+      esac
+      case "$expect:$rc" in
+        exit:124 | exit:137) echo "$tag: не завершился за $limit с" >&2 ;;
+        *) echo "$tag: код завершения $rc (ожидалось: $expect)" >&2 ;;
+      esac
+      cat "$TMPDIR/$tag.out" >&2
+      return 1
     }
 
     echo "== 2. создание информационной базы"

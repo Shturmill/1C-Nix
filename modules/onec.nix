@@ -45,6 +45,7 @@ let
       extraPkgs
       ;
     inherit (cfg.client) scale;
+    enableX11Fixes = cfg.client.x11Fixes.enable;
   };
 
   o = pkg.optName;
@@ -229,6 +230,15 @@ in
           одинаков на всех мониторах.
         '';
       };
+      x11Fixes.enable = mkOption {
+        type = types.bool;
+        default = true;
+        description = ''
+          Подгружать клиентам LD_PRELOAD-библиотеку с обходами дефектов окон
+          1С под X11/XWayland (pkgs/onec/x11-fixes.c). На один запуск
+          отключается без пересборки: `ONEC_NO_X11_FIXES=1 1cv8`.
+        '';
+      };
     };
 
     server = {
@@ -258,6 +268,20 @@ in
         default = 1541;
         description = "Порт главного менеджера кластера.";
       };
+      securityLevel = mkOption {
+        type = types.enum [
+          0
+          1
+          2
+        ];
+        default = 0;
+        description = ''
+          Уровень безопасности соединений ragent (-seclev): 0 — без защиты,
+          1 — защищено только при аутентификации, 2 — защищено всё
+          соединение. 0 оставлен по умолчанию ради совместимости; для
+          рабочих серверов рассмотрите 2.
+        '';
+      };
       range = mkOption {
         type = types.str;
         default = "1560:1591";
@@ -286,6 +310,13 @@ in
         type = types.port;
         default = 1545;
         description = "Порт ras.";
+      };
+      agentAddress = mkOption {
+        type = types.str;
+        default = "localhost:${toString cfg.server.port}";
+        defaultText = lib.literalExpression ''"localhost:''${toString config.services.onec.server.port}"'';
+        example = "192.168.1.100:1540";
+        description = "Адрес агента сервера (ragent), который обслуживает ras.";
       };
       openFirewall = mkOption {
         type = types.bool;
@@ -368,7 +399,7 @@ in
             "-range"
             cfg.server.range
             "-seclev"
-            "0"
+            (toString cfg.server.securityLevel)
             "-pingPeriod"
             "1000"
             "-pingTimeout"
@@ -405,11 +436,12 @@ in
       systemd.services."1c-ras" = lib.recursiveUpdate serverUnitCommon {
         description = "1C:Enterprise ${pkg.version} remote administration server";
         after = [ "network-online.target" ] ++ optional cfg.server.enable "1c-ragent.service";
+        requires = optional cfg.server.enable "1c-ragent.service";
         serviceConfig.ExecStart = lib.escapeShellArgs [
           "${pkg}/bin/ras"
           "cluster"
           "--port=${toString cfg.ras.port}"
-          "localhost:${toString cfg.server.port}"
+          cfg.ras.agentAddress
         ];
       };
       networking.firewall.allowedTCPPorts = mkIf cfg.ras.openFirewall [ cfg.ras.port ];

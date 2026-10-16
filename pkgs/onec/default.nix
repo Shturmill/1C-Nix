@@ -49,6 +49,9 @@
   # Масштаб интерфейса клиентов 1С, дробный (1.25 = 125 %). null — как в
   # системе. На один запуск: ONEC_SCALE=1.5 1cv8c.
   scale ? null,
+  # Подгружать клиентам обходы дефектов окон X11 (x11-fixes.c). На один
+  # запуск отключаются без пересборки: ONEC_NO_X11_FIXES=1 1cv8.
+  enableX11Fixes ? true,
 }:
 
 let
@@ -158,11 +161,15 @@ let
     if [ "$#" -eq 0 ]; then exec bash; fi
     if [ "$1" = "-c" ]; then exec bash "$@"; fi
     prog="$1"; shift
-    case "$prog" in
-      1cv8 | 1cv8c | 1cestart | 1cv8t | 1cv8ct | 1cestartt)
-        export LD_PRELOAD="${x11Fixes}/lib/libonec-x11-fixes.so''${LD_PRELOAD:+ $LD_PRELOAD}"
-        ;;
-    esac
+    ${lib.optionalString enableX11Fixes ''
+      case "$prog" in
+        1cv8 | 1cv8c | 1cestart | 1cv8t | 1cv8ct | 1cestartt)
+          if [ "''${ONEC_NO_X11_FIXES:-}" != 1 ]; then
+            export LD_PRELOAD="${x11Fixes}/lib/libonec-x11-fixes.so''${LD_PRELOAD:+ $LD_PRELOAD}"
+          fi
+          ;;
+      esac
+    ''}
     for d in ${dist}/opt/1cv8*/x86_64/*/ ${dist}/opt/1cv8*/common/; do
       if [ -x "$d$prog" ] && [ -f "$d$prog" ]; then exec "$d$prog" "$@"; fi
     done

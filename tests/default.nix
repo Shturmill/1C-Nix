@@ -164,6 +164,11 @@ let
     scale = 1.25;
   };
 
+  onecNoX11Fixes = self.lib.mkOnec pkgs {
+    src = installerTarball;
+    enableX11Fixes = false;
+  };
+
   # Сервера в учебной версии нет — сборка должна упасть с понятной ошибкой.
   onecTrainingServer = self.lib.mkOnec pkgs {
     src = trainingTarball;
@@ -220,6 +225,16 @@ let
     (mkSystem {
       src = trainingTarball;
       server.enable = true;
+    }).config;
+
+  # RAS для удалённого агента, без локального сервера.
+  rcfg =
+    (mkSystem {
+      src = installerTarball;
+      ras = {
+        enable = true;
+        agentAddress = "192.168.1.100:1540";
+      };
     }).config;
 
   failedAssertions = c: map (a: a.message) (lib.filter (a: !a.assertion) c.assertions);
@@ -313,6 +328,9 @@ in
     let
       rules = mcfg.systemd.tmpfiles.rules;
       trules = tcfg.systemd.tmpfiles.rules;
+      ragent = mcfg.systemd.services."1c-ragent";
+      ras = mcfg.systemd.services."1c-ras";
+      rras = rcfg.systemd.services."1c-ras";
     in
     assert lib.elem "d /var/1C/licenses 2775 root grp1cv8 -" rules;
     assert lib.elem "grp1cv8" mcfg.users.users.alice.extraGroups;
@@ -322,6 +340,11 @@ in
     assert failedAssertions tcfg == [ ];
     assert failedAssertions mcfg == [ ];
     assert lib.length (failedAssertions tcfgServer) == 1;
+    assert lib.hasInfix "-seclev 0 " ragent.serviceConfig.ExecStart;
+    assert lib.hasSuffix " localhost:1540" ras.serviceConfig.ExecStart;
+    assert lib.elem "1c-ragent.service" ras.requires;
+    assert lib.hasSuffix " 192.168.1.100:1540" rras.serviceConfig.ExecStart;
+    assert rras.requires == [ ];
     pkgs.writeText "onec-test-module" ''
       ragent: ${mcfg.systemd.services."1c-ragent".serviceConfig.ExecStart}
       ras: ${mcfg.systemd.services."1c-ras".serviceConfig.ExecStart}
@@ -342,6 +365,12 @@ in
     # обходы X11 (x11-fixes.c) подгружаются клиентам и не мешают процессу
     echo "$out1" | grep -qx 'preload=${onecFromInstaller.x11Fixes}/lib/libonec-x11-fixes.so'
 
+    # отключение на один запуск и параметром пакета
+    out_off="$(ONEC_NO_X11_FIXES=1 ${onecFromInstaller}/bin/1cv8c 2>&1)"
+    echo "$out_off" | grep -qx 'preload='
+    out_off2="$(${onecNoX11Fixes}/bin/1cv8c 2>&1)"
+    echo "$out_off2" | grep -qx 'preload='
+
     out2="$(${onecTraining}/bin/1cestartt 2>&1)"
     echo "$out2" | grep -q 'fake 1cestartt'
     echo "$out2" | grep -q 'preload=.*libonec-x11-fixes.so'
@@ -361,4 +390,43 @@ in
     [ "$s1" = 1.250000 ] && [ "$s2" = 1.5 ]
     touch "$out"
   '';
+
+  # Обход «пустого окна рядом с диалогом» (x11-fixes.c) на Xvfb, без 1С:
+  # override-redirect получает только невидимый родитель 1×1, и только
+  # пока обходы не отключены.
+  x11-fixes =
+    let
+      probe =
+        pkgs.runCommandCC "onec-x11-fixes-test"
+          {
+            buildInputs = [ (pkgs.libx11 or pkgs.xorg.libX11) ];
+          }
+          ''
+            mkdir -p "$out/bin"
+            cc -O2 -Wall -Wextra -Werror -o "$out/bin/x11-fixes-test" ${./x11-fixes-test.c} -lX11
+          '';
+      so = "${onecFromInstaller.x11Fixes}/lib/libonec-x11-fixes.so";
+      steps = pkgs.writeShellScript "onec-x11-fixes-steps" ''
+        set -eu
+        # check <ожидаемый override_redirect> <parent|normal> <map|raised> [переменные…]
+        check() {
+          expect=$1 kind=$2 call=$3
+          shift 3
+          got="$(env "$@" ${probe}/bin/x11-fixes-test "$kind" "$call")"
+          echo "$kind $call $*: $got"
+          [ "$got" = "override_redirect=$expect" ]
+        }
+        for call in map raised; do
+          check 1 parent "$call" LD_PRELOAD=${so}
+          check 0 normal "$call" LD_PRELOAD=${so}
+          check 0 parent "$call" LD_PRELOAD=${so} ONEC_NO_X11_FIXES=1
+          check 1 parent "$call" LD_PRELOAD=${so} ONEC_NO_X11_FIXES=0
+          check 0 parent "$call"
+        done
+      '';
+    in
+    runCommand "onec-test-x11-fixes" { nativeBuildInputs = [ pkgs.xvfb-run ]; } ''
+      xvfb-run -a -s "-screen 0 640x480x24" ${steps}
+      touch "$out"
+    '';
 }

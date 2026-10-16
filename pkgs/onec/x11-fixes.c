@@ -56,6 +56,7 @@ static int (*real_timedjoin)(pthread_t, void **, const struct timespec *);
 static int (*real_sem_wait)(sem_t *);
 static int (*real_sem_timedwait)(sem_t *, const struct timespec *);
 static int (*real_map_window)(Display *, Window);
+static int (*real_map_raised)(Display *, Window);
 static Status (*real_get_normal_hints)(Display *, Window, XSizeHints *,
                                        long *);
 static int (*real_get_property)(Display *, Window, Atom, long, long, Bool,
@@ -79,11 +80,13 @@ static void init(void) {
   real_sem_wait = dlsym(RTLD_NEXT, "sem_wait");
   real_sem_timedwait = dlsym(RTLD_NEXT, "sem_timedwait");
   real_map_window = dlsym(RTLD_NEXT, "XMapWindow");
+  real_map_raised = dlsym(RTLD_NEXT, "XMapRaised");
   real_get_normal_hints = dlsym(RTLD_NEXT, "XGetWMNormalHints");
   real_get_property = dlsym(RTLD_NEXT, "XGetWindowProperty");
   real_change_attributes = dlsym(RTLD_NEXT, "XChangeWindowAttributes");
   real_free = dlsym(RTLD_NEXT, "XFree");
-  disabled = getenv("ONEC_NO_X11_FIXES") != NULL;
+  const char *off = getenv("ONEC_NO_X11_FIXES");
+  disabled = off && strcmp(off, "1") == 0;
 }
 
 static long long now_ns(void) {
@@ -269,10 +272,19 @@ static int is_modal_parent(Display *dpy, Window w) {
   XSizeHints hints;
   long supplied;
   if (!real_get_normal_hints(dpy, w, &hints, &supplied) ||
-      !(hints.flags & PMaxSize) || hints.max_width > 1 ||
-      hints.max_height > 1)
+      (hints.flags & (PMinSize | PMaxSize)) != (PMinSize | PMaxSize) ||
+      hints.min_width != 1 || hints.min_height != 1 ||
+      hints.max_width != 1 || hints.max_height != 1)
     return 0;
   return is_dialog(dpy, w);
+}
+
+static void before_map(Display *dpy, Window w) {
+  pthread_once(&once, init);
+  if (!disabled && is_modal_parent(dpy, w)) {
+    XSetWindowAttributes attrs = {.override_redirect = True};
+    real_change_attributes(dpy, w, CWOverrideRedirect, &attrs);
+  }
 }
 
 /* --- Перехваты ----------------------------------------------------------- */
@@ -302,13 +314,16 @@ int XNextEvent(Display *dpy, XEvent *ev) {
   return r;
 }
 
+/* GDK показывает окна через XMapWindow; XMapRaised — на случай, если
+ * окно показывает сама 1С. */
 int XMapWindow(Display *dpy, Window w) {
-  pthread_once(&once, init);
-  if (!disabled && is_modal_parent(dpy, w)) {
-    XSetWindowAttributes attrs = {.override_redirect = True};
-    real_change_attributes(dpy, w, CWOverrideRedirect, &attrs);
-  }
+  before_map(dpy, w);
   return real_map_window(dpy, w);
+}
+
+int XMapRaised(Display *dpy, Window w) {
+  before_map(dpy, w);
+  return real_map_raised(dpy, w);
 }
 
 int nanosleep(const struct timespec *req, struct timespec *rem) {
