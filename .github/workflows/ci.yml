@@ -1,0 +1,26 @@
+# CI гоняет проверки на ФАЛЬШИВЫХ дистрибутивах (tests/default.nix).
+# Настоящий дистрибутив 1С в CI не нужен и класть его туда нельзя.
+name: checks
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  flake-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Ubuntu 24.04 по умолчанию запрещает непривилегированные user
+      # namespaces, а распаковка и FHS-окружение работают через bubblewrap.
+      - name: Allow user namespaces
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: nix flake check
+        run: nix flake check --print-build-logs
