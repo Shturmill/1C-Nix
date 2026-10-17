@@ -42,7 +42,11 @@ let
         < /dev/null > "$TMPDIR/$tag.out" 2>&1 || rc=$?
       pkill -f "$TMPDIR/ib" || true
       case "$expect:$rc" in
-        exit:0 | alive:124 | alive:137) return 0 ;;
+        exit:0 | alive:124) return 0 ;;
+        alive:137)
+          echo "$tag: прожил $limit с, но на TERM не завершился — добит KILL" >&2
+          return 0
+          ;;
       esac
       case "$expect:$rc" in
         exit:124 | exit:137) echo "$tag: не завершился за $limit с" >&2 ;;

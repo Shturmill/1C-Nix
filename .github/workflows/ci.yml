@@ -2,22 +2,29 @@
 # Настоящий дистрибутив 1С в CI не нужен и класть его туда нельзя.
 name: checks
 
+# push — только в master: ветки PR проверяет pull_request, без двойного прогона.
 on:
   push:
+    branches: [master]
   pull_request:
+
+permissions:
+  contents: read
 
 jobs:
   flake-check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       # Ubuntu 24.04 по умолчанию запрещает непривилегированные user
       # namespaces, а распаковка и FHS-окружение работают через bubblewrap.
       - name: Allow user namespaces
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 
-      - uses: cachix/install-nix-action@v31
+      - uses: cachix/install-nix-action@2126ae7fc54c9df00dd18f7f18754393182c73cd # v31.9.1
         with:
           extra_nix_config: |
             experimental-features = nix-command flakes
