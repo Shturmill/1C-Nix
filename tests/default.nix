@@ -210,9 +210,22 @@ let
       server = {
         enable = true;
         openFirewall = true;
+        range = "1560:1591,1600:1610";
       };
       ras.enable = true;
       licensesDir.users = [ "alice" ];
+    }).config;
+
+  # Сервер от своего пользователя (root уже объявлен в NixOS).
+  ucfg =
+    (mkSystem {
+      src = installerTarball;
+      keepSrc = false;
+      server = {
+        enable = true;
+        user = "root";
+        group = "root";
+      };
     }).config;
 
   tcfg =
@@ -304,6 +317,30 @@ in
       touch "$out"
     '';
 
+  # В --help нет списка компонентов: с autoDisableComponents сборка
+  # останавливается, без него — ставит, что попросили.
+  help-unparsed =
+    let
+      tarball = mkTarball {
+        name = "server64_8_3_99_3.tar.gz";
+        runName = "setup-full-8.3.99.3-x86_64.run";
+        installer = mkFakeInstaller {
+          version = "8.3.99.3";
+          allowed = "";
+        };
+      };
+      failed = pkgs.testers.testBuildFailure (self.lib.mkOnec pkgs { src = tarball; }).dist;
+      lenient = self.lib.mkOnec pkgs {
+        src = tarball;
+        autoDisableComponents = false;
+      };
+    in
+    runCommand "onec-test-help-unparsed" { } ''
+      grep -q 'не удалось прочитать список компонентов' ${failed}/testBuildFailure.log
+      [ -x ${lenient.dist}/opt/1cv8/x86_64/8.3.99.3/1cv8 ]
+      touch "$out"
+    '';
+
   legacy-deb = runCommand "onec-test-legacy-deb" { } ''
     set -eu
     [ "${onecLegacy.version}" = 8.3.12.1855 ]
@@ -332,15 +369,30 @@ in
       ras = mcfg.systemd.services."1c-ras";
       rras = rcfg.systemd.services."1c-ras";
     in
-    assert lib.elem "d /var/1C/licenses 2775 root grp1cv8 -" rules;
-    assert lib.elem "grp1cv8" mcfg.users.users.alice.extraGroups;
-    assert mcfg.users.groups ? grp1cv8;
+    assert lib.elem "d /var/1C/licenses 2775 root grp1cv8lic -" rules;
+    assert lib.elem "grp1cv8lic" mcfg.users.users.alice.extraGroups;
+    assert !(lib.elem "grp1cv8" mcfg.users.users.alice.extraGroups);
+    assert lib.elem "grp1cv8lic" mcfg.users.users.usr1cv8.extraGroups;
+    assert mcfg.users.groups ? grp1cv8 && mcfg.users.groups ? grp1cv8lic;
     assert lib.any (lib.hasPrefix "C /opt/1cv8/conf/conf.cfg ") rules;
-    assert lib.any (lib.hasPrefix "L+ /opt/1cv8t/x86_64/${trainingVersion} ") trules;
+    assert lib.elem "L+ /opt/1cv8t/x86_64 - - - - ${onecTraining.optRoot}/1cv8t/x86_64" trules;
+    assert !(lib.any (lib.hasPrefix "d /opt/1cv8t/x86_64") trules);
     assert failedAssertions tcfg == [ ];
     assert failedAssertions mcfg == [ ];
     assert lib.length (failedAssertions tcfgServer) == 1;
+    # открытый файрвол при seclev 0 — предупреждение, без него — нет
+    assert lib.length (lib.filter (lib.hasPrefix "services.onec:") mcfg.warnings) == 1;
+    assert lib.filter (lib.hasPrefix "services.onec:") tcfg.warnings == [ ];
+    assert lib.length mcfg.networking.firewall.allowedTCPPortRanges == 2;
+    assert lib.elem "${installerTarball}" mcfg.system.extraDependencies;
+    assert ucfg.system.extraDependencies == [ ];
+    assert ragent.serviceConfig.NoNewPrivileges && ragent.serviceConfig.ProtectSystem == "strict";
+    assert ucfg.users.users.root.home == "/root";
+    # тип description: без двоеточий и переводов строки
+    assert mcfg.users.users.usr1cv8.description != "";
+    assert !(ucfg.users.users ? usr1cv8);
     assert lib.hasInfix "-seclev 0 " ragent.serviceConfig.ExecStart;
+    assert lib.hasInfix "-pingPeriod 1000 -pingTimeout 5000" ragent.serviceConfig.ExecStart;
     assert lib.hasSuffix " localhost:1540" ras.serviceConfig.ExecStart;
     assert lib.elem "1c-ragent.service" ras.requires;
     assert lib.hasSuffix " 192.168.1.100:1540" rras.serviceConfig.ExecStart;
@@ -382,6 +434,12 @@ in
     loc="$(${onecTraining}/bin/onec-shell -c 'LC_ALL=ru_RU.UTF-8 date -d @0 +%B' 2>&1)"
     echo "$loc"
     [ "$loc" = января ] || [ "$loc" = январь ]
+
+    # LANG — по языку, только если своего нет; LC_ALL не навязывается
+    l1="$(env -u LANG -u LC_ALL ${onecTraining}/bin/onec-shell -c 'echo "$LANG/''${LC_ALL:-}"' 2>/dev/null)"
+    l2="$(env -u LC_ALL LANG=en_US.UTF-8 ${onecTraining}/bin/onec-shell -c 'echo "$LANG/''${LC_ALL:-}"' 2>/dev/null)"
+    echo "locale: $l1 / $l2"
+    [ "$l1" = ru_RU.UTF-8/ ] && [ "$l2" = en_US.UTF-8/ ]
 
     # масштаб из параметра и его переопределение на один запуск
     s1="$(${onecTraining}/bin/onec-shell -c 'echo $GDK_DPI_SCALE' 2>/dev/null)"
@@ -455,4 +513,53 @@ in
       xvfb-run -a -s "-screen 0 640x480x24" ${steps}
       touch "$out"
     '';
+
+  # Модуль в виртуальной машине: ragent и ras под ограничениями systemd
+  # действительно запускаются через bubblewrap; /opt и /var/1C/licenses —
+  # такие, как ожидают 1cestart и лицензирование.
+  module-vm = pkgs.testers.runNixOSTest {
+    name = "onec-module-vm";
+    nodes.machine = {
+      imports = [ self.nixosModules.default ];
+      users.users.alice.isNormalUser = true;
+      services.onec = {
+        enable = true;
+        src = installerTarball;
+        server.enable = true;
+        ras.enable = true;
+        licensesDir.users = [ "alice" ];
+      };
+    };
+    testScript = ''
+      def show(unit, prop):
+          return machine.succeed(f"systemctl show -P {prop} {unit}").strip()
+
+      machine.wait_for_unit("multi-user.target")
+      for unit, line in [
+          ("1c-ragent", "fake ragent -d /var/lib/1cv8 -port 1540 "),
+          ("1c-ras", "fake ras cluster --port=1545 localhost:1540"),
+      ]:
+          # фальшивый бинарник печатает строку и выходит с кодом 0; если
+          # bwrap не запустился, сервис перезапускается с ошибкой
+          machine.wait_until_succeeds(f"journalctl -b -u {unit} -o cat | grep -qF -- '{line}'")
+          machine.wait_until_succeeds(f"test \"$(systemctl show -P ActiveState {unit})\" = inactive")
+          assert show(unit, "ExecMainStatus") == "0", unit
+          assert show(unit, "NoNewPrivileges") == "yes", unit
+          assert show(unit, "ProtectSystem") == "strict", unit
+
+      machine.succeed("test \"$(stat -c '%a %U %G' /var/1C/licenses)\" = '2775 root grp1cv8lic'")
+      machine.succeed("id -nG usr1cv8 | grep -qw grp1cv8lic")
+      machine.succeed("id -nG alice | grep -qw grp1cv8lic")
+      machine.fail("id -nG alice | grep -qw grp1cv8")
+
+      machine.succeed("test -L /opt/1cv8/x86_64 && test -x /opt/1cv8/x86_64/${fakeVersion}/ragent")
+      # старая раскладка (каталог со ссылками на версии) заменяется ссылкой
+      machine.succeed(
+          "rm /opt/1cv8/x86_64 && mkdir /opt/1cv8/x86_64"
+          " && ln -s /nix/store/old /opt/1cv8/x86_64/8.3.0.1"
+          " && systemd-tmpfiles --create --prefix /opt/1cv8"
+      )
+      machine.succeed("test -L /opt/1cv8/x86_64 && test ! -L /opt/1cv8/x86_64/8.3.0.1")
+    '';
+  };
 }

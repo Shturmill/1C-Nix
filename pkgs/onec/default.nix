@@ -1,8 +1,9 @@
 # Стадия 2: запуск платформы 1С в FHS-окружении.
 #
 # Бинарники 1С не патчатся (autoPatchelf и подмены dlopen не нужны): они
-# запускаются в bubblewrap-песочнице buildFHSEnv, где /usr/lib содержит
+# запускаются в FHS-окружении buildFHSEnv (bubblewrap), где /usr/lib содержит
 # библиотеки из nixpkgs, а собственные .so платформы находятся через $ORIGIN.
+# Это не изоляция: окружению видны /home, /run, /dev, сеть и D-Bus.
 #
 # Использование:
 #   pkgs.callPackage ./pkgs/onec { src = <дистрибутив>; }
@@ -97,6 +98,18 @@ let
   scaleStr = if scale == null then "" else toString scale;
 
   finalComponents = lib.unique (components ++ [ language ]);
+
+  # Локаль по умолчанию (LANG), если своей нет: по языку интерфейса.
+  defaultLocale =
+    {
+      ru = "ru_RU.UTF-8";
+      en = "en_US.UTF-8";
+      uk = "uk_UA.UTF-8";
+      be = "be_BY.UTF-8";
+      kk = "kk_KZ.UTF-8";
+      de = "de_DE.UTF-8";
+    }
+    .${language} or "C.UTF-8";
 
   dist = callPackage ./dist.nix {
     inherit
@@ -204,7 +217,8 @@ let
       # LOCALE_ARCHIVE_2_27 (NixOS) glibc читает раньше LOCALE_ARCHIVE.
       export LOCALE_ARCHIVE=/usr/lib/locale/locale-archive
       unset LOCALE_ARCHIVE_2_27
-      { export LC_ALL="''${LC_ALL:-ru_RU.UTF-8}"; } 2>/dev/null
+      # LANG/LC_* пользователя (и сервиса) не трогаем.
+      export LANG="''${LANG:-${defaultLocale}}"
 
       # 1С поддерживает только X11; под Wayland-композитором работаем через
       # XWayland. Своё значение: ONEC_GDK_BACKEND=wayland.
@@ -333,9 +347,13 @@ runCommand "onec-platform-${finalVersion}"
       [ -e "$out/bin/$prog" ] && cp "$item" "$out/share/applications/"
     done
 
-    # Иконки из поставки, если инсталлятор их положил.
-    for png in $(find ${dist}/opt -name '*.png' -path '*icon*' 2>/dev/null | head -n 20); do
+    # Иконки из поставки под именами из .desktop (1cestart, 1cv8c, 1cv8),
+    # если инсталлятор их положил: самая большая подходящая.
+    for icon in 1cestart 1cv8c 1cv8; do
+      png="$(find ${dist}/opt -name "$icon.png" -printf '%s %p\n' 2>/dev/null \
+        | sort -n | tail -n1 | cut -d' ' -f2-)"
+      [ -n "$png" ] || continue
       mkdir -p "$out/share/pixmaps"
-      cp -n "$png" "$out/share/pixmaps/" || true
+      cp "$png" "$out/share/pixmaps/$icon.png"
     done
   ''

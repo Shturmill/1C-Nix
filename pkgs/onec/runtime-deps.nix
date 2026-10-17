@@ -70,67 +70,66 @@ let
     } # libwx_gtk3u_gl
   ];
 in
-with pkgs;
 {
   common = [
-    stdenv.cc.cc.lib # libstdc++ / libgcc_s вместо бандловых
-    glibc
-    zlib
-    util-linux.lib # libuuid
-    e2fsprogs # libcom_err
-    krb5 # libgssapi_krb5 (Kerberos-аутентификация)
+    pkgs.stdenv.cc.cc.lib # libstdc++ / libgcc_s вместо бандловых
+    pkgs.glibc
+    pkgs.zlib
+    pkgs.util-linux.lib # libuuid
+    pkgs.e2fsprogs # libcom_err
+    pkgs.krb5 # libgssapi_krb5 (Kerberos-аутентификация)
     (pkgs.unixodbc or pkgs.unixODBC)
-    libxml2
-    openssl
-    curl
-    glib
+    pkgs.libxml2
+    pkgs.openssl
+    pkgs.curl
+    pkgs.glib
   ];
 
   server = [
-    fontconfig
-    freetype
-    cairo
-    pango
-    harfbuzz
-    libpng
-    libjpeg
-    libtiff
+    pkgs.fontconfig
+    pkgs.freetype
+    pkgs.cairo
+    pkgs.pango
+    pkgs.harfbuzz
+    pkgs.libpng
+    pkgs.libjpeg
+    pkgs.libtiff
   ];
 
   client = [
     # графика и GTK
-    gtk3
-    cairo
-    pango
-    harfbuzz
-    gdk-pixbuf
-    atk
-    at-spi2-atk
-    at-spi2-core
-    fontconfig
-    freetype
-    libpng
-    libjpeg
-    libtiff
-    libGL
-    libGLU
-    libxkbcommon
-    dbus
-    gsettings-desktop-schemas
-    adwaita-icon-theme
+    pkgs.gtk3
+    pkgs.cairo
+    pkgs.pango
+    pkgs.harfbuzz
+    pkgs.gdk-pixbuf
+    pkgs.atk
+    pkgs.at-spi2-atk
+    pkgs.at-spi2-core
+    pkgs.fontconfig
+    pkgs.freetype
+    pkgs.libpng
+    pkgs.libjpeg
+    pkgs.libtiff
+    pkgs.libGL
+    pkgs.libGLU
+    pkgs.libxkbcommon
+    pkgs.dbus
+    pkgs.gsettings-desktop-schemas
+    pkgs.adwaita-icon-theme
 
     # печать: 1cv8, 1cv8c и uiproxy линкуются с libcups.so.2 напрямую
-    cups.lib
+    pkgs.cups.lib
 
     # встроенный браузер (HTML-поля, справка, веб-формы)
-    webkitgtk_4_1
-    libsoup_3
-    libsecret
-    gst_all_1.gstreamer
-    gst_all_1.gst-plugins-base
+    pkgs.webkitgtk_4_1
+    pkgs.libsoup_3
+    pkgs.libsecret
+    pkgs.gst_all_1.gstreamer
+    pkgs.gst_all_1.gst-plugins-base
 
     # шрифты, на которые рассчитаны печатные формы
-    corefonts
+    pkgs.corefonts
   ]
   ++ x11;
 }

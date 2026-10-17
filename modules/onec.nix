@@ -40,6 +40,7 @@ let
     components = effectiveComponents;
     inherit (cfg)
       disabledComponents
+      autoDisableComponents
       preferWebkit41
       dropBundledLibs
       extraPkgs
@@ -52,6 +53,21 @@ let
   o = pkg.optName;
   licGroup = cfg.licensesDir.group;
 
+  defaultUser = "usr1cv8";
+  defaultGroup = "grp1cv8";
+
+  # «1560:1591,1600:1610» -> [ { from = 1560; to = 1591; } … ]
+  portRanges = map (
+    r:
+    let
+      p = lib.splitString ":" r;
+    in
+    {
+      from = lib.toInt (builtins.elemAt p 0);
+      to = lib.toInt (builtins.elemAt p 1);
+    }
+  ) (lib.splitString "," cfg.server.range);
+
   serverUnitCommon = {
     after = [ "network-online.target" ];
     wants = [ "network-online.target" ];
@@ -62,8 +78,32 @@ let
       Restart = "on-failure";
       RestartSec = 5;
       LimitNOFILE = 65536;
-      # Без RestrictNamespaces/NoNewPrivileges-ограничений userns:
-      # бинарники 1С запускаются через bubblewrap.
+
+      # Бинарники 1С запускаются через bubblewrap (buildFHSEnv) в user
+      # namespace. NoNewPrivileges ему не мешает (bwrap без setuid и сам
+      # ставит PR_SET_NO_NEW_PRIVS), а ломают его RestrictNamespaces и всё,
+      # что перекрывает /proc (ProtectKernelTunables, ProtectKernelLogs,
+      # ProtectProc, ProcSubset): в user namespace ядро разрешает
+      # смонтировать proc только при полностью видимом /proc.
+      NoNewPrivileges = true;
+      ProtectSystem = "strict";
+      ProtectHome = true;
+      PrivateTmp = true;
+      ReadWritePaths = [
+        cfg.server.dataDir
+      ]
+      ++ optional cfg.licensesDir.enable "/var/1C/licenses";
+      LockPersonality = true;
+      RestrictRealtime = true;
+      RestrictSUIDSGID = true;
+      SystemCallArchitectures = "native";
+      UMask = "0027";
+      RestrictAddressFamilies = [
+        "AF_UNIX"
+        "AF_INET"
+        "AF_INET6"
+        "AF_NETLINK"
+      ];
     };
   };
 in
@@ -116,6 +156,17 @@ in
       description = "Компоненты, которые явно не ставить (--disable-components).";
     };
 
+    autoDisableComponents = mkOption {
+      type = types.bool;
+      default = true;
+      description = ''
+        Отключить все компоненты дистрибутива, кроме нужных (иначе
+        инсталлятор добавит свой набор по умолчанию: ws, en…). Список
+        берётся из `--help` инсталлятора; если его не удалось прочитать,
+        сборка останавливается. false — ставить, как решит инсталлятор.
+      '';
+    };
+
     language = mkOption {
       type = types.str;
       default = "ru";
@@ -132,7 +183,7 @@ in
     };
 
     dropBundledLibs = mkOption {
-      type = types.listOf types.str;
+      type = types.listOf (types.strMatching "[A-Za-z0-9._+-]+");
       default = [ ];
       example = [ "libcairo-v8.so" ];
       description = "Бандловые .so платформы, которые удалить (отладка конфликтов библиотек).";
@@ -176,6 +227,17 @@ in
       '';
     };
 
+    keepSrc = mkOption {
+      type = types.bool;
+      default = true;
+      description = ''
+        Держать дистрибутив (src) в замыкании системы. Без этого
+        nix-collect-garbage удаляет архив, и первая же пересборка после
+        обновления nixpkgs останавливается на requireFile, пока архив не
+        добавлен в стор заново.
+      '';
+    };
+
     licensesDir = {
       enable = mkOption {
         type = types.bool;
@@ -184,15 +246,17 @@ in
       };
       group = mkOption {
         type = types.str;
-        default = cfg.server.group;
-        defaultText = lib.literalExpression "config.services.onec.server.group";
+        default = "grp1cv8lic";
         description = ''
           Группа-владелец /var/1C/licenses. Активировать и использовать
-          программные лицензии могут root и члены этой группы.
+          программные лицензии могут root и члены этой группы. Отдельная от
+          группы сервера: пользователи настольных машин не должны попадать в
+          группу серверного процесса. Пользователь сервера добавляется в неё
+          сам.
         '';
       };
       mode = mkOption {
-        type = types.str;
+        type = types.strMatching "[0-7]{3,4}";
         default = "2775";
         description = ''
           Права на /var/1C/licenses: владелец root, запись — группе, остальным
@@ -257,16 +321,22 @@ in
       enable = mkEnableOption "кластер серверов 1С (ragent)";
       user = mkOption {
         type = types.str;
-        default = "usr1cv8";
-        description = "Пользователь сервера 1С.";
+        default = defaultUser;
+        description = ''
+          Пользователь сервера 1С. Создаётся модулем, только если оставлен
+          по умолчанию; своего пользователя объявите сами.
+        '';
       };
       group = mkOption {
         type = types.str;
-        default = "grp1cv8";
-        description = "Группа сервера 1С.";
+        default = defaultGroup;
+        description = ''
+          Группа сервера 1С. Создаётся модулем, только если оставлена по
+          умолчанию.
+        '';
       };
       dataDir = mkOption {
-        type = types.path;
+        type = types.strMatching "/.+";
         default = "/var/lib/1cv8";
         description = "Каталог данных кластера (параметр -d).";
       };
@@ -295,14 +365,28 @@ in
         '';
       };
       range = mkOption {
-        type = types.str;
+        type = types.strMatching "[0-9]+:[0-9]+(,[0-9]+:[0-9]+)*";
         default = "1560:1591";
-        description = "Диапазон портов рабочих процессов.";
+        example = "1560:1591,1600:1610";
+        description = "Диапазоны портов рабочих процессов (-range).";
+      };
+      pingPeriod = mkOption {
+        type = types.ints.positive;
+        default = 1000;
+        description = "Период контроля соединений между процессами кластера, мс (-pingPeriod).";
+      };
+      pingTimeout = mkOption {
+        type = types.ints.positive;
+        default = 5000;
+        description = "Таймаут контроля соединений, мс (-pingTimeout).";
       };
       debug = mkOption {
         type = types.bool;
         default = false;
-        description = "Запустить сервер с отладкой (-debug -http).";
+        description = ''
+          Запустить сервер с отладкой (-debug -http). Сервер отладки не
+          требует аутентификации: только для доверенной сети.
+        '';
       };
       extraArgs = mkOption {
         type = types.listOf types.str;
@@ -353,11 +437,35 @@ in
         }
       ];
 
+      warnings =
+        let
+          noAdmin = ''
+            Пока администратор кластера не задан (так сразу после установки),
+            кластером может управлять любой, кто достучится до портов ${toString cfg.server.port}
+            и ${toString cfg.ras.port}: задайте администратора (rac cluster admin register).'';
+        in
+        optional (cfg.server.enable && cfg.server.openFirewall && cfg.server.securityLevel == 0) ''
+          services.onec: server.openFirewall открывает порты ${toString cfg.server.port}, ${toString cfg.server.regport}
+          и ${cfg.server.range} в сеть при server.securityLevel = 0 — соединения не
+          шифруются. Рассмотрите securityLevel = 2. ${noAdmin}''
+        ++ optional (
+          cfg.ras.enable && cfg.ras.openFirewall
+        ) "services.onec: ras.openFirewall открывает порт ras (${toString cfg.ras.port}) в сеть. ${noAdmin}"
+        ++ optional (cfg.server.enable && cfg.server.debug) ''
+          services.onec: server.debug поднимает сервер отладки без аутентификации —
+          только для доверенной сети.'';
+
+      # Через строку: путь вне стора (src = ./архив) так тоже попадает в стор,
+      # а extraDependencies принимает только пути из стора.
+      system.extraDependencies = optional cfg.keepSrc "${cfg.src}";
+
       systemd.tmpfiles.rules =
         optionals cfg.linkToOpt [
           "d /opt/${o} 0755 root root -"
-          "d /opt/${o}/x86_64 0755 root root -"
-          "L+ /opt/${o}/x86_64/${pkg.version} - - - - ${pkg.optRoot}/${o}/x86_64/${pkg.version}"
+          # Одна ссылка на весь каталог версий: записи, исчезнувшие из
+          # конфигурации, systemd-tmpfiles не удаляет, и старые версии
+          # оставались бы в /opt (и выбирались бы 1cestart после отката).
+          "L+ /opt/${o}/x86_64 - - - - ${pkg.optRoot}/${o}/x86_64"
           "L+ /opt/${o}/common - - - - ${pkg.optRoot}/${o}/common"
           # Общий conf.cfg платформы: копия, чтобы его можно было править
           # (уже существующий файл не перезаписывается).
@@ -384,15 +492,23 @@ in
     })
 
     (mkIf (cfg.server.enable || cfg.ras.enable) {
-      users.users.${cfg.server.user} = {
-        isSystemUser = true;
-        group = cfg.server.group;
-        home = cfg.server.dataDir;
-        createHome = true;
-        description = "1C:Enterprise server";
-        extraGroups = optional (cfg.licensesDir.enable && licGroup != cfg.server.group) licGroup;
-      };
-      users.groups.${cfg.server.group} = { };
+      users.users.${cfg.server.user} = mkMerge [
+        (mkIf (cfg.server.user == defaultUser) {
+          isSystemUser = true;
+          group = cfg.server.group;
+          home = cfg.server.dataDir;
+          createHome = true;
+          description = "1C Enterprise server";
+        })
+        {
+          extraGroups = optional (cfg.licensesDir.enable && licGroup != cfg.server.group) licGroup;
+        }
+      ];
+      users.groups.${cfg.server.group} = mkIf (cfg.server.group == defaultGroup) { };
+      # Свой пользователь может жить где угодно — каталог данных создаём сами.
+      systemd.tmpfiles.rules = optional (
+        cfg.server.user != defaultUser
+      ) "d ${cfg.server.dataDir} 0750 ${cfg.server.user} ${cfg.server.group} -";
       environment.systemPackages = [ pkg ]; # rac, ibcmd и др. для администратора
     })
 
@@ -413,9 +529,9 @@ in
             "-seclev"
             (toString cfg.server.securityLevel)
             "-pingPeriod"
-            "1000"
+            (toString cfg.server.pingPeriod)
             "-pingTimeout"
-            "5000"
+            (toString cfg.server.pingTimeout)
           ]
           ++ optionals cfg.server.debug [
             "-debug"
@@ -425,23 +541,13 @@ in
         );
       };
 
-      networking.firewall = mkIf cfg.server.openFirewall (
-        let
-          parts = lib.splitString ":" cfg.server.range;
-        in
-        {
-          allowedTCPPorts = [
-            cfg.server.port
-            cfg.server.regport
-          ];
-          allowedTCPPortRanges = [
-            {
-              from = lib.toInt (builtins.elemAt parts 0);
-              to = lib.toInt (builtins.elemAt parts 1);
-            }
-          ];
-        }
-      );
+      networking.firewall = mkIf cfg.server.openFirewall {
+        allowedTCPPorts = [
+          cfg.server.port
+          cfg.server.regport
+        ];
+        allowedTCPPortRanges = portRanges;
+      };
     })
 
     (mkIf cfg.ras.enable {

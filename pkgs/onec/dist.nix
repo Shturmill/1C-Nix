@@ -43,6 +43,10 @@ let
     which
   ];
 in
+# Имена файлов, а не пути: удаляются внутри каталога платформы.
+assert lib.assertMsg (lib.all (
+  n: builtins.match "[A-Za-z0-9._+-]+" n != null
+) dropBundledLibs) "onec: dropBundledLibs — только имена файлов (libfoo.so), без путей";
 stdenvNoCC.mkDerivation {
   pname = "onec-dist";
   inherit version src;
@@ -111,9 +115,12 @@ stdenvNoCC.mkDerivation {
       mkdir -p "$root/opt" "$root/applications"
 
       # /etc хоста не пробрасываем: postinst ветвится по /etc/os-release,
-      # а результат сборки не должен зависеть от машины.
+      # а результат сборки не должен зависеть от машины. Сеть, PID и IPC
+      # тоже отдельные: не полагаемся только на песочницу Nix (при
+      # sandbox = false проприетарный инсталлятор иначе получил бы сеть).
       sandbox=(bwrap
-        --unshare-user --uid 0 --gid 0
+        --unshare-all --unshare-user --uid 0 --gid 0
+        --die-with-parent --new-session
         --ro-bind /nix /nix
         --ro-bind-try /etc/passwd /etc/passwd
         --ro-bind-try /etc/group /etc/group
@@ -168,6 +175,12 @@ stdenvNoCC.mkDerivation {
             esac
           done
         fi
+      elif [ -n "$onecAutoDisable" ]; then
+        # Без списка не отключить лишнее: состав пакета зависел бы от
+        # набора 1С по умолчанию (см. выше).
+        echo "onec: не удалось прочитать список компонентов из --help $(basename "$installer")" >&2
+        echo "      (сборка с autoDisableComponents = false пропустит проверку)" >&2
+        exit 1
       else
         echo "onec: не удалось прочитать список компонентов из --help, проверка пропущена" >&2
       fi
