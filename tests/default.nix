@@ -392,37 +392,63 @@ in
   '';
 
   # Обход «пустого окна рядом с диалогом» (x11-fixes.c) на Xvfb, без 1С:
-  # override-redirect получает только невидимый родитель 1×1, и только
-  # пока обходы не отключены.
+  # override-redirect получает только невидимый родитель 1×1, только в
+  # процессах 1С и только пока обходы не отключены. Библиотека не роняет
+  # процесс, который подгружает libX11 через dlopen.
   x11-fixes =
     let
+      # Сама библиотека собирается без -Werror (у пользователя может быть
+      # новее GCC), здесь — строго.
+      strict =
+        pkgs.runCommandCC "onec-x11-fixes-strict"
+          {
+            buildInputs = [ (pkgs.libx11 or pkgs.xorg.libX11) ];
+          }
+          ''
+            cc -O2 -Wall -Wextra -Werror -shared -fPIC -o "$out" ${../pkgs/onec/x11-fixes.c} -ldl -lpthread
+          '';
       probe =
         pkgs.runCommandCC "onec-x11-fixes-test"
           {
             buildInputs = [ (pkgs.libx11 or pkgs.xorg.libX11) ];
           }
           ''
-            mkdir -p "$out/bin"
+            mkdir -p "$out/bin" "$out/lib"
             cc -O2 -Wall -Wextra -Werror -o "$out/bin/x11-fixes-test" ${./x11-fixes-test.c} -lX11
+            cc -O2 -Wall -Wextra -Werror -shared -fPIC -DPROBE_LIBRARY \
+              -o "$out/lib/libprobe.so" ${./x11-fixes-test.c} -lX11
+            cc -O2 -Wall -Wextra -Werror -o "$out/bin/x11-fixes-dlopen" ${./x11-fixes-dlopen.c} -ldl
+            ln -s x11-fixes-test "$out/bin/1cv8c"
+            ln -s x11-fixes-dlopen "$out/bin/1cv8"
           '';
       so = "${onecFromInstaller.x11Fixes}/lib/libonec-x11-fixes.so";
       steps = pkgs.writeShellScript "onec-x11-fixes-steps" ''
         set -eu
-        # check <ожидаемый override_redirect> <parent|normal> <map|raised> [переменные…]
+        # check <ожидаемый override_redirect> <программа> <аргументы…> -- [переменные…]
         check() {
-          expect=$1 kind=$2 call=$3
-          shift 3
-          got="$(env "$@" ${probe}/bin/x11-fixes-test "$kind" "$call")"
-          echo "$kind $call $*: $got"
+          expect=$1 prog=$2
+          shift 2
+          args=""
+          while [ "$1" != -- ]; do args="$args $1"; shift; done
+          shift
+          got="$(env "$@" ${probe}/bin/$prog $args)"
+          echo "$prog$args $*: $got"
           [ "$got" = "override_redirect=$expect" ]
         }
         for call in map raised; do
-          check 1 parent "$call" LD_PRELOAD=${so}
-          check 0 normal "$call" LD_PRELOAD=${so}
-          check 0 parent "$call" LD_PRELOAD=${so} ONEC_NO_X11_FIXES=1
-          check 1 parent "$call" LD_PRELOAD=${so} ONEC_NO_X11_FIXES=0
-          check 0 parent "$call"
+          check 1 1cv8c parent "$call" -- LD_PRELOAD=${so}
+          check 0 1cv8c normal "$call" -- LD_PRELOAD=${so}
+          check 0 1cv8c parent "$call" -- LD_PRELOAD=${so} ONEC_NO_X11_FIXES=1
+          check 1 1cv8c parent "$call" -- LD_PRELOAD=${so} ONEC_NO_X11_FIXES=0
+          check 0 1cv8c parent "$call" --
+          # не процесс 1С
+          check 0 x11-fixes-test parent "$call" -- LD_PRELOAD=${so}
+          for scope in global local; do
+            check 1 1cv8 ${probe}/lib/libprobe.so $scope parent "$call" -- LD_PRELOAD=${so}
+            check 0 x11-fixes-dlopen ${probe}/lib/libprobe.so $scope parent "$call" -- LD_PRELOAD=${so}
+          done
         done
+        [ -e ${strict} ]
       '';
     in
     runCommand "onec-test-x11-fixes" { nativeBuildInputs = [ pkgs.xvfb-run ]; } ''

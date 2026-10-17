@@ -52,6 +52,9 @@
   # Подгружать клиентам обходы дефектов окон X11 (x11-fixes.c). На один
   # запуск отключаются без пересборки: ONEC_NO_X11_FIXES=1 1cv8.
   enableX11Fixes ? true,
+  # Обход долгого закрытия окон из x11-fixes.c (эвристика по времени,
+  # поэтому выключен). На один запуск: ONEC_X11_FAST_CLOSE=1 1cv8.
+  x11FastClose ? false,
 }:
 
 let
@@ -150,7 +153,7 @@ let
       }
       ''
         mkdir -p "$out/lib"
-        cc -O2 -Wall -Wextra -Werror -shared -fPIC \
+        cc -O2 -Wall -shared -fPIC \
           -o "$out/lib/libonec-x11-fixes.so" ${./x11-fixes.c} -ldl -lpthread
       '';
 
@@ -166,6 +169,7 @@ let
         1cv8 | 1cv8c | 1cestart | 1cv8t | 1cv8ct | 1cestartt)
           if [ "''${ONEC_NO_X11_FIXES:-}" != 1 ]; then
             export LD_PRELOAD="${x11Fixes}/lib/libonec-x11-fixes.so''${LD_PRELOAD:+ $LD_PRELOAD}"
+            ${lib.optionalString x11FastClose ''export ONEC_X11_FAST_CLOSE="''${ONEC_X11_FAST_CLOSE:-1}"''}
           fi
           ;;
       esac

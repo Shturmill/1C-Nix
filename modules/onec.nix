@@ -46,6 +46,7 @@ let
       ;
     inherit (cfg.client) scale;
     enableX11Fixes = cfg.client.x11Fixes.enable;
+    x11FastClose = cfg.client.x11Fixes.fastClose;
   };
 
   o = pkg.optName;
@@ -235,8 +236,19 @@ in
         default = true;
         description = ''
           Подгружать клиентам LD_PRELOAD-библиотеку с обходами дефектов окон
-          1С под X11/XWayland (pkgs/onec/x11-fixes.c). На один запуск
+          1С под X11/XWayland (pkgs/onec/x11-fixes.c): серые полосы после
+          fullscreen/тайлинга и пустое окно рядом с диалогом. На один запуск
           отключается без пересборки: `ONEC_NO_X11_FIXES=1 1cv8`.
+        '';
+      };
+      x11Fixes.fastClose = mkOption {
+        type = types.bool;
+        default = false;
+        description = ''
+          Прятать закрываемое окно, не дожидаясь, пока 1С остановит свои
+          потоки (~2 с). Держится на эвристике по времени (перехват
+          sem_wait, pthread_join, nanosleep), поэтому выключено. На один
+          запуск: `ONEC_X11_FAST_CLOSE=1 1cv8`.
         '';
       };
     };

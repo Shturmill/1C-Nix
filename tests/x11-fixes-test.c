@@ -4,10 +4,14 @@
  * с заданными подсказками размера, показывает его и печатает,
  * выставлен ли override-redirect.
  *
- *   x11-fixes-test <parent|normal> <map|raised>
+ *   1cv8c <parent|normal> <map|raised>
  *
  * parent — невидимый родитель модального диалога 1С: min = max = 1×1;
  * normal — обычный диалог 400×300.
+ *
+ * Обходы работают только в процессах 1С, поэтому программа запускается
+ * под именем клиента (симлинк 1cv8c). С -DPROBE_LIBRARY собирается
+ * библиотека с функцией probe() для x11-fixes-dlopen.c.
  */
 #include <X11/Xatom.h>
 #include <X11/Xlib.h>
@@ -15,11 +19,9 @@
 #include <stdio.h>
 #include <string.h>
 
-int main(int argc, char **argv) {
-  if (argc != 3)
-    return 2;
-  int parent = strcmp(argv[1], "parent") == 0;
-  int raised = strcmp(argv[2], "raised") == 0;
+int probe(const char *kind, const char *call) {
+  int parent = strcmp(kind, "parent") == 0;
+  int raised = strcmp(call, "raised") == 0;
 
   Display *dpy = XOpenDisplay(NULL);
   if (!dpy)
@@ -58,3 +60,9 @@ int main(int argc, char **argv) {
   XCloseDisplay(dpy);
   return 0;
 }
+
+#ifndef PROBE_LIBRARY
+int main(int argc, char **argv) {
+  return argc == 3 ? probe(argv[1], argv[2]) : 2;
+}
+#endif
