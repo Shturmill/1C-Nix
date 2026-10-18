@@ -55,15 +55,18 @@ let
       d=/opt/${top}/x86_64/${version}
       mkdir -p "$d"
       mk() {
-        printf '#!/bin/sh\necho "fake %s $*"\necho "preload=''${LD_PRELOAD:-}"\nls /usr/lib/libgtk-3.so.0 >/dev/null 2>&1 && echo fhs-ok\nexit 0\n' "$1" > "$d/$1"
+        printf '#!/bin/sh\necho "fake %s $*"\necho "preload=''${LD_PRELOAD:-}"\nls /usr/lib/libgtk-3.so.0 >/dev/null 2>&1 && echo fhs-ok\n%s\nexit 0\n' "$1" "''${2:-}" > "$d/$1"
         chmod +x "$d/$1"
       }
+      # как служба (ragent -d <каталог>, ras cluster) — не выходит, как
+      # настоящий сервер; ragent отмечает каждый запуск в каталоге данных
+      daemon='case "$1" in -d) echo start >> "$2/fake-starts" ;; cluster) ;; *) exit 0 ;; esac; exec sleep infinity'
       for c in $(echo "$comps" | tr , ' '); do
         case "$c" in
           client_thin) mk 1cv8c${t}; mk 1cestart${t} ;;
           client_full) mk 1cv8${t}; mk 1cv8c${t}; mk 1cestart${t} ;;
-          server) mk ragent; mk rphost; mk rmngr; mk ibsrv ;;
-          server_admin) mk ras; mk rac ;;
+          server) mk ragent "$daemon"; mk rphost; mk rmngr; mk ibsrv ;;
+          server_admin) mk ras "$daemon"; mk rac ;;
         esac
       done
       echo old > "$d/libstdc++.so.6.0.28"
@@ -180,8 +183,11 @@ let
 
   onecLegacy = self.lib.mkOnec pkgs { src = debTarball; };
 
-  mkSystem =
-    onecCfg:
+  mkSystem = mkSystemWith { };
+
+  # extra — ещё один модуль NixOS рядом с services.onec.
+  mkSystemWith =
+    extra: onecCfg:
     nixpkgs.lib.nixosSystem {
       system = "x86_64-linux";
       modules = [
@@ -200,6 +206,7 @@ let
           }
           // onecCfg;
         }
+        extra
       ];
     };
 
@@ -210,7 +217,8 @@ let
       server = {
         enable = true;
         openFirewall = true;
-        range = "1560:1591,1600:1610";
+        allowInsecureNetwork = true;
+        range = "1600:1610,1560:1591";
       };
       ras.enable = true;
       licensesDir.users = [ "alice" ];
@@ -251,6 +259,32 @@ let
     }).config;
 
   failedAssertions = c: map (a: a.message) (lib.filter (a: !a.assertion) c.assertions);
+
+  # Сколько проверок модуля не проходит сервер с такими настройками.
+  serverFailures =
+    server:
+    lib.length (
+      failedAssertions
+        (mkSystem {
+          src = installerTarball;
+          server = {
+            enable = true;
+          }
+          // server;
+        }).config
+    );
+
+  rangeTypeOk =
+    range:
+    (builtins.tryEval
+      (mkSystem {
+        src = installerTarball;
+        server = {
+          enable = true;
+          inherit range;
+        };
+      }).config.services.onec.server.range
+    ).success;
 
   closure = drv: pkgs.closureInfo { rootPaths = [ drv ]; };
 in
@@ -317,6 +351,23 @@ in
       touch "$out"
     '';
 
+  # Два инсталлятора в одном архиве — ошибка со списком, а не первый попавшийся.
+  two-installers =
+    let
+      tarball = runCommand "server64_8_3_99_1.tar.gz" { } ''
+        mkdir dist
+        tar -xzf ${installerTarball} -C dist
+        cp dist/setup-full-${fakeVersion}-x86_64.run dist/setup-thin-${fakeVersion}-x86_64.run
+        tar -czf "$out" -C dist .
+      '';
+      failed = pkgs.testers.testBuildFailure (self.lib.mkOnec pkgs { src = tarball; }).dist;
+    in
+    runCommand "onec-test-two-installers" { } ''
+      grep -q 'несколько инсталляторов' ${failed}/testBuildFailure.log
+      grep -q 'setup-thin-${fakeVersion}-x86_64.run' ${failed}/testBuildFailure.log
+      touch "$out"
+    '';
+
   # В --help нет списка компонентов: с autoDisableComponents сборка
   # останавливается, без него — ставит, что попросили.
   help-unparsed =
@@ -375,11 +426,35 @@ in
     assert lib.elem "grp1cv8lic" mcfg.users.users.usr1cv8.extraGroups;
     assert mcfg.users.groups ? grp1cv8 && mcfg.users.groups ? grp1cv8lic;
     assert lib.any (lib.hasPrefix "C /opt/1cv8/conf/conf.cfg ") rules;
-    assert lib.elem "L+ /opt/1cv8t/x86_64 - - - - ${onecTraining.optRoot}/1cv8t/x86_64" trules;
-    assert !(lib.any (lib.hasPrefix "d /opt/1cv8t/x86_64") trules);
+    # /opt/<o>/x86_64 ставит служба onec-opt-link: «L+» удалил бы чужой каталог
+    assert !(lib.any (lib.hasInfix "/opt/1cv8t/x86_64") trules);
+    assert lib.hasInfix "onec-link-opt" tcfg.systemd.services.onec-opt-link.serviceConfig.ExecStart;
     assert failedAssertions tcfg == [ ];
     assert failedAssertions mcfg == [ ];
     assert lib.length (failedAssertions tcfgServer) == 1;
+    assert serverFailures { openFirewall = true; } == 1;
+    assert
+      serverFailures {
+        openFirewall = true;
+        securityLevel = 2;
+      } == 0;
+    assert serverFailures { range = "1591:1560"; } == 1;
+    assert serverFailures { range = "1:99999"; } == 1;
+    # ноль и ведущие нули отсекает тип опции (lib.toInt на «01560» падает)
+    assert !(rangeTypeOk "0:1591");
+    assert !(rangeTypeOk "01560:1591");
+    assert rangeTypeOk "1560:1591";
+    # выключенный файрвол при seclev 0 — тоже предупреждение
+    assert
+      lib.length (
+        lib.filter (lib.hasPrefix "services.onec:")
+          (mkSystemWith { networking.firewall.enable = false; } {
+            src = installerTarball;
+            server.enable = true;
+          }).config.warnings
+      ) == 1;
+    assert serverFailures { range = "1560:1591,1580:1600"; } == 1;
+    assert serverFailures { range = "1560:1591,1592:1600"; } == 0;
     # открытый файрвол при seclev 0 — предупреждение, без него — нет
     assert lib.length (lib.filter (lib.hasPrefix "services.onec:") mcfg.warnings) == 1;
     assert lib.filter (lib.hasPrefix "services.onec:") tcfg.warnings == [ ];
@@ -557,6 +632,8 @@ in
   # такие, как ожидают 1cestart и лицензирование.
   module-vm = pkgs.testers.runNixOSTest {
     name = "onec-module-vm";
+    # без KVM тест идёт минуты, а не час: падать раньше, чем таймаут CI
+    globalTimeout = 15 * 60;
     nodes.machine = {
       imports = [ self.nixosModules.default ];
       users.users.alice.isNormalUser = true;
@@ -572,32 +649,72 @@ in
       def show(unit, prop):
           return machine.succeed(f"systemctl show -P {prop} {unit}").strip()
 
+      def wait_running(unit):
+          machine.wait_for_unit(unit)
+          pid = show(unit, "MainPID")
+          assert machine.succeed(f"ps -o user= -p {pid}").strip() == "usr1cv8", unit
+          assert show(unit, "NoNewPrivileges") == "yes", unit
+          assert show(unit, "ProtectSystem") == "strict", unit
+
+      # Type=simple: systemctl возвращается до того, как ragent дошёл до записи
+      def wait_starts(n):
+          machine.wait_until_succeeds(
+              f"test \"$(wc -l < /var/lib/1cv8/fake-starts)\" = {n}", timeout=60
+          )
+
       machine.wait_for_unit("multi-user.target")
+      # фальшивые ragent и ras, как настоящие, работают постоянно; если
+      # bwrap не запустился, служба падает и перезапускается
       for unit, line in [
           ("1c-ragent", "fake ragent -d /var/lib/1cv8 -port 1540 "),
           ("1c-ras", "fake ras cluster --port=1545 localhost:1540"),
       ]:
-          # фальшивый бинарник печатает строку и выходит с кодом 0; если
-          # bwrap не запустился, сервис перезапускается с ошибкой
+          wait_running(unit)
           machine.wait_until_succeeds(f"journalctl -b -u {unit} -o cat | grep -qF -- '{line}'")
-          machine.wait_until_succeeds(f"test \"$(systemctl show -P ActiveState {unit})\" = inactive")
-          assert show(unit, "ExecMainStatus") == "0", unit
-          assert show(unit, "NoNewPrivileges") == "yes", unit
-          assert show(unit, "ProtectSystem") == "strict", unit
+          assert show(unit, "NRestarts") == "0", unit
+      wait_starts(1)
+
+      # перезапуск: службы снова работают, каталог данных сохраняется
+      machine.succeed("systemctl restart 1c-ragent 1c-ras")
+      wait_running("1c-ragent")
+      wait_running("1c-ras")
+      wait_starts(2)
+      machine.fail("journalctl -b -u 1c-ragent -u 1c-ras -o cat | grep -i bwrap")
 
       machine.succeed("test \"$(stat -c '%a %U %G' /var/1C/licenses)\" = '2775 root grp1cv8lic'")
       machine.succeed("id -nG usr1cv8 | grep -qw grp1cv8lic")
       machine.succeed("id -nG alice | grep -qw grp1cv8lic")
       machine.fail("id -nG alice | grep -qw grp1cv8")
 
+      machine.wait_for_unit("onec-opt-link")
       machine.succeed("test -L /opt/1cv8/x86_64 && test -x /opt/1cv8/x86_64/${fakeVersion}/ragent")
-      # старая раскладка (каталог со ссылками на версии) заменяется ссылкой
+      target = machine.succeed("readlink /opt/1cv8/x86_64").strip()
+
+      # прежняя раскладка модуля (каталог из ссылок в стор) заменяется ссылкой
       machine.succeed(
           "rm /opt/1cv8/x86_64 && mkdir /opt/1cv8/x86_64"
           " && ln -s /nix/store/old /opt/1cv8/x86_64/8.3.0.1"
-          " && systemd-tmpfiles --create --prefix /opt/1cv8"
+          " && systemctl restart onec-opt-link"
       )
-      machine.succeed("test -L /opt/1cv8/x86_64 && test ! -L /opt/1cv8/x86_64/8.3.0.1")
+      machine.succeed(f"test \"$(readlink /opt/1cv8/x86_64)\" = {target}")
+
+      # установка штатным инсталлятором не удаляется: ошибка, каталог цел
+      machine.succeed(
+          "rm /opt/1cv8/x86_64 && mkdir -p /opt/1cv8/x86_64/8.3.24.1548"
+          " && echo keep > /opt/1cv8/x86_64/8.3.24.1548/1cv8"
+          " && ln -s /nix/store/old /opt/1cv8/x86_64/8.3.0.1"
+      )
+      machine.fail("systemctl restart onec-opt-link")
+      assert show("onec-opt-link", "ActiveState") == "failed"
+      machine.wait_until_succeeds("journalctl -b -u onec-opt-link -o cat | grep -qF 'linkToOpt = false'")
+      machine.succeed("test ! -L /opt/1cv8/x86_64 && grep -qx keep /opt/1cv8/x86_64/8.3.24.1548/1cv8")
+      machine.succeed("test -L /opt/1cv8/x86_64/8.3.0.1 && test ! -e /opt/1cv8/x86_64.onec-new")
+      # common обрабатывается независимо и остаётся ссылкой
+      machine.succeed("test -L /opt/1cv8/common")
+
+      # после того как каталог убран, ссылка ставится
+      machine.succeed("mv /opt/1cv8/x86_64 /opt/1cv8/x86_64.bak && systemctl restart onec-opt-link")
+      machine.succeed(f"test \"$(readlink /opt/1cv8/x86_64)\" = {target}")
     '';
   };
 }

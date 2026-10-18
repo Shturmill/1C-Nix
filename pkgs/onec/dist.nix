@@ -96,8 +96,16 @@ stdenvNoCC.mkDerivation {
         exit 1 ;;
     esac
 
-    installer="$(find "$work" -type f -name 'setup-*.run' | sort | head -n1)"
-    [ -n "$installer" ] || installer="$(find "$work" -type f -name '*.run' | sort | head -n1)"
+    mapfile -t installers < <(find "$work" -type f -name 'setup-*.run' | sort)
+    [ "''${#installers[@]}" -gt 0 ] || mapfile -t installers < <(find "$work" -type f -name '*.run' | sort)
+    # Лучше ошибка, чем молча поставленная не та версия или архитектура.
+    if [ "''${#installers[@]}" -gt 1 ]; then
+      echo "onec: в дистрибутиве $srcName несколько инсталляторов:" >&2
+      printf '        %s\n' "''${installers[@]#"$work"/}" >&2
+      echo "      оставьте в архиве только нужный" >&2
+      exit 1
+    fi
+    installer="''${installers[0]:-}"
 
     if [ -n "$installer" ]; then
       # --- 2a. Новый формат (8.3.18+): единый инсталлятор ----------------

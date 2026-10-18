@@ -53,6 +53,47 @@ let
   o = pkg.optName;
   licGroup = cfg.licensesDir.group;
 
+  # Одна ссылка на весь каталог версий: отдельные ссылки на версии,
+  # исчезнувшие из конфигурации, оставались бы в /opt (и выбирались бы
+  # 1cestart после отката). Заменяем только ссылку, пустой каталог или
+  # прежнюю раскладку модуля (каталог из одних ссылок в /nix/store);
+  # чужую установку не трогаем и останавливаемся с ошибкой.
+  optLinkScript = pkgs.writeShellScript "onec-link-opt" ''
+    set -eu
+    PATH=${
+      lib.makeBinPath [
+        pkgs.coreutils
+        pkgs.findutils
+      ]
+    }
+    rc=0
+    link() {
+      dst=$1 target=$2
+      if [ -d "$dst" ] && [ ! -L "$dst" ]; then
+        if [ -n "$(find "$dst" -mindepth 1 \( ! -type l -o ! -lname '/nix/store/*' \) -print -quit)" ]; then
+          echo "services.onec: $dst — каталог не из этого модуля (вероятно, установка" >&2
+          echo "  штатным инсталлятором 1С); оставлен как есть, ссылка не создана." >&2
+          echo "  Сохраните и уберите его (mv $dst $dst.bak) или задайте" >&2
+          echo "  services.onec.linkToOpt = false." >&2
+          rc=1
+          return
+        fi
+        find "$dst" -mindepth 1 -delete
+        rmdir "$dst"
+      elif [ -e "$dst" ] && [ ! -L "$dst" ]; then
+        echo "services.onec: $dst существует и не является ссылкой; оставлен как есть." >&2
+        rc=1
+        return
+      fi
+      ln -sfnT "$target" "$dst.onec-new"
+      mv -fT "$dst.onec-new" "$dst"
+    }
+    mkdir -p /opt/${o}
+    link /opt/${o}/x86_64 ${pkg.optRoot}/${o}/x86_64
+    link /opt/${o}/common ${pkg.optRoot}/${o}/common
+    exit "$rc"
+  '';
+
   defaultUser = "usr1cv8";
   defaultGroup = "grp1cv8";
 
@@ -207,8 +248,10 @@ in
       default = true;
       description = ''
         Опубликовать платформу по штатному пути /opt/1cv8/x86_64/<версия>
-        (через systemd-tmpfiles). Нужно 1cestart для поиска версий,
-        а также внешним инструментам — 1C:EDT, vanessa-runner и т.п.
+        (ссылкой в /nix/store, служба onec-opt-link). Нужно 1cestart для
+        поиска версий, а также внешним инструментам — 1C:EDT,
+        vanessa-runner и т.п. Каталог, оставленный штатным инсталлятором
+        1С, не удаляется: служба завершится ошибкой, пока его не уберут.
       '';
     };
 
@@ -365,7 +408,7 @@ in
         '';
       };
       range = mkOption {
-        type = types.strMatching "[0-9]+:[0-9]+(,[0-9]+:[0-9]+)*";
+        type = types.strMatching "[1-9][0-9]*:[1-9][0-9]*(,[1-9][0-9]*:[1-9][0-9]*)*";
         default = "1560:1591";
         example = "1560:1591,1600:1610";
         description = "Диапазоны портов рабочих процессов (-range).";
@@ -397,6 +440,15 @@ in
         type = types.bool;
         default = false;
         description = "Открыть port, regport и range в файрволе.";
+      };
+      allowInsecureNetwork = mkOption {
+        type = types.bool;
+        default = false;
+        description = ''
+          Разрешить openFirewall при securityLevel = 0, то есть
+          нешифрованные соединения с кластером из сети. Без этой опции
+          такое сочетание — ошибка конфигурации.
+        '';
       };
     };
 
@@ -435,6 +487,32 @@ in
             «Технологическая платформа 1С:Предприятия (64-bit) для Linux».
           '';
         }
+        {
+          assertion =
+            cfg.server.enable && cfg.server.openFirewall && cfg.server.securityLevel == 0
+            -> cfg.server.allowInsecureNetwork;
+          message = ''
+            services.onec: server.openFirewall при server.securityLevel = 0 открывает
+            в сеть нешифрованные соединения с кластером. Задайте securityLevel = 2
+            или, если сеть доверенная, server.allowInsecureNetwork = true.
+          '';
+        }
+        {
+          assertion =
+            let
+              sorted = lib.sort (a: b: a.from < b.from) portRanges;
+              at = builtins.elemAt sorted;
+            in
+            cfg.server.enable
+            ->
+              lib.all (r: r.from >= 1 && r.from <= r.to && r.to <= 65535) portRanges
+              && lib.all (i: (at i).to < (at (i + 1)).from) (lib.range 0 (lib.length sorted - 2));
+          message = ''
+            services.onec: server.range = "${cfg.server.range}" — каждый диапазон
+            должен быть вида «начало:конец», 1 ≤ начало ≤ конец ≤ 65535, и
+            диапазоны не должны пересекаться.
+          '';
+        }
       ];
 
       warnings =
@@ -451,6 +529,12 @@ in
         ++ optional (
           cfg.ras.enable && cfg.ras.openFirewall
         ) "services.onec: ras.openFirewall открывает порт ras (${toString cfg.ras.port}) в сеть. ${noAdmin}"
+        ++
+          optional (cfg.server.enable && cfg.server.securityLevel == 0 && !config.networking.firewall.enable)
+            ''
+              services.onec: файрвол выключен, и порты ragent доступны из сети при
+              server.securityLevel = 0 — соединения не шифруются. Рассмотрите
+              securityLevel = 2. ${noAdmin}''
         ++ optional (cfg.server.enable && cfg.server.debug) ''
           services.onec: server.debug поднимает сервер отладки без аутентификации —
           только для доверенной сети.'';
@@ -459,14 +543,25 @@ in
       # а extraDependencies принимает только пути из стора.
       system.extraDependencies = optional cfg.keepSrc "${cfg.src}";
 
+      # Ссылки /opt/<o>/{x86_64,common} ставит отдельная служба, а не
+      # «L+» systemd-tmpfiles: «L+» рекурсивно удаляет каталог на месте
+      # ссылки, в том числе установку 1С штатным инсталлятором. Не скрипт
+      # активации: с system.nixos-init.enable они не выполняются, а ошибка
+      # службы видна в systemctl --failed.
+      systemd.services.onec-opt-link = mkIf cfg.linkToOpt {
+        description = "Link 1C:Enterprise ${pkg.version} into /opt/${o}";
+        wantedBy = [ "multi-user.target" ];
+        unitConfig.RequiresMountsFor = "/opt";
+        serviceConfig = {
+          Type = "oneshot";
+          RemainAfterExit = true;
+          ExecStart = "${optLinkScript}";
+        };
+      };
+
       systemd.tmpfiles.rules =
         optionals cfg.linkToOpt [
           "d /opt/${o} 0755 root root -"
-          # Одна ссылка на весь каталог версий: записи, исчезнувшие из
-          # конфигурации, systemd-tmpfiles не удаляет, и старые версии
-          # оставались бы в /opt (и выбирались бы 1cestart после отката).
-          "L+ /opt/${o}/x86_64 - - - - ${pkg.optRoot}/${o}/x86_64"
-          "L+ /opt/${o}/common - - - - ${pkg.optRoot}/${o}/common"
           # Общий conf.cfg платформы: копия, чтобы его можно было править
           # (уже существующий файл не перезаписывается).
           "d /opt/${o}/conf 0755 root root -"

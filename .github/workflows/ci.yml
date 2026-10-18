@@ -13,9 +13,12 @@ permissions:
 
 jobs:
   flake-check:
-    runs-on: ubuntu-latest
+    # ubuntu-latest переходит на 26.04; настройки AppArmor ниже проверены
+    # на 24.04 — версию поднимать отдельно.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
 
@@ -31,3 +34,35 @@ jobs:
 
       - name: nix flake check
         run: nix flake check --print-build-logs
+
+  # NixOS-тест модуля в QEMU (packages.module-vm-test): без KVM он идёт
+  # на порядки медленнее, поэтому KVM включаем явно и проверяем.
+  nixos-vm:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Allow user namespaces
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+          test -w /dev/kvm
+
+      - uses: cachix/install-nix-action@2126ae7fc54c9df00dd18f7f18754393182c73cd # v31.9.1
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            system-features = nixos-test benchmark big-parallel kvm
+
+      - name: NixOS VM test
+        timeout-minutes: 30
+        run: nix build .#module-vm-test --print-build-logs

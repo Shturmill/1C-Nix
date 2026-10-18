@@ -1,6 +1,6 @@
-# 1C-nix — 1С:Предприятие 8.3 для Nix / NixOS
+# 1C-Nix — 1С:Предприятие 8.3 для Nix / NixOS
 
-onec-nix — Nix-пакет и NixOS-модуль для платформы «1С:Предприятие 8.3»:
+1C-Nix — Nix-пакет и NixOS-модуль для платформы «1С:Предприятие 8.3»:
 клиент, сервер (ragent), RAS, учебная версия.
 
 > **Дистрибутива 1С здесь нет и не будет.** Каждый пользователь скачивает
@@ -80,6 +80,12 @@ onec-nix — Nix-пакет и NixOS-модуль для платформы «1�
 > `nix-collect-garbage` его не удаляет и пересборка после обновления nixpkgs
 > работает. С `keepSrc = false` и без модуля (`mkOnec`) архив после сборки
 > мусора придётся снова добавить: `nix store add --mode flat`.
+>
+> `/nix/store` доступен на чтение всем локальным пользователям: на
+> многопользовательской машине архив и собранная платформа видны каждому
+> (`keepSrc = false` убирает только архив, и то после сборки мусора). Это
+> свойство Nix, а не модуля. Не кладите в архив ключи, пароли и другие
+> секреты.
 
 ## Совместимость
 
@@ -127,6 +133,7 @@ services.onec = {
   server = {
     enable = true;          # systemd: 1c-ragent.service, пользователь usr1cv8
     openFirewall = true;    # 1540, 1541, 1560–1591
+    securityLevel = 2;      # с openFirewall при 0 нужен allowInsecureNetwork
     # dataDir = "/var/lib/1cv8"; port = 1540; regport = 1541; range = "1560:1591";
   };
   ras.enable = true;        # 1c-ras.service на 1545, для rac и консолей
@@ -150,8 +157,23 @@ services.onec = {
 > Пока администратор кластера не задан (так сразу после установки),
 > кластером может управлять любой, кто достучится до 1540 или 1545, —
 > задайте его сразу (`rac cluster admin register`). `server.debug` поднимает
-> сервер отладки без аутентификации. На `openFirewall` при `securityLevel =
-> 0`, `ras.openFirewall` и `server.debug` модуль выдаёт предупреждения.
+> сервер отладки без аутентификации. `server.openFirewall` при
+> `securityLevel = 0` — ошибка конфигурации, пока не задано
+> `server.allowInsecureNetwork = true` (только для доверенной сети); на
+> `ras.openFirewall`, `server.debug` и выключенный файрвол при
+> `securityLevel = 0` модуль выдаёт предупреждения.
+>
+> Минимум перед открытием сервера в сеть:
+>
+> 1. `server.securityLevel = 2`, клиенты проверены с этим уровнем.
+> 2. Администратор кластера и агента задан (`rac cluster admin register`,
+>    `rac agent admin register`).
+> 3. Порт RAS (1545) в сеть не открыт (`ras.openFirewall = false`) или
+>    закрыт файрволом для всех, кроме администраторов.
+> 4. `server.debug = false`.
+> 5. Работа кластера проверена: `rac cluster list localhost:1545`, тестовая
+>    база создаётся и открывается, после `systemctl restart 1c-ragent
+>    1c-ras` всё на месте.
 >
 > Сервисы ragent и ras запускаются с ограничениями systemd (`ProtectSystem
 > = "strict"`, `ProtectHome`, `PrivateTmp`, `NoNewPrivileges`…); писать
@@ -202,7 +224,8 @@ onec.lib.mkOnec pkgs {
 | `server.*`, `ras.*` | выкл. | сервисы ragent и ras |
 | `server.securityLevel` | `0` | `-seclev` агента: 0 / 1 / 2 |
 | `ras.agentAddress` | `localhost:<server.port>` | агент, который обслуживает ras |
-| `linkToOpt` | `true` | `/opt/1cv8/x86_64/<версия>`, `common`, `conf/conf.cfg` (для 1cestart, EDT); `x86_64` — ссылка в стор целиком, прежний каталог на её месте удаляется |
+| `server.allowInsecureNetwork` | `false` | разрешить `openFirewall` при `securityLevel = 0` |
+| `linkToOpt` | `true` | `/opt/1cv8/x86_64/<версия>`, `common`, `conf/conf.cfg` (для 1cestart, EDT); `x86_64` — ссылка в стор целиком. Каталог от штатного инсталлятора 1С не удаляется: служба `onec-opt-link` завершается ошибкой, пока его не перенесут (`mv /opt/1cv8/x86_64 /opt/1cv8/x86_64.bak`) или не зададут `linkToOpt = false` |
 | `optName` | по имени файла | `"1cv8t"` — учебная версия |
 | `licensesDir.mode` / `.group` | `"2775"` / `grp1cv8lic` | права на `/var/1C/licenses` |
 | `licensesDir.users` | `[ ]` | кого добавить в группу лицензий |
@@ -297,6 +320,11 @@ onec.lib.mkOnec pkgs {
   подставляет свой `FONTCONFIG_FILE` (системная конфигурация + шрифты
   окружения); если вы задаёте `FONTCONFIG_FILE` сами, проверьте его.
 
+В сообщении о проблеме укажите: версию NixOS (`nixos-version`) и ревизию
+этого flake, версию и тип дистрибутива 1С, DE/WM и X11 или Wayland, включён
+ли `x11Fixes` (и воспроизводится ли с `ONEC_NO_X11_FIXES=1`), вывод запуска
+из терминала, для сервера — `journalctl -u 1c-ragent -u 1c-ras`.
+
 ## Разработка
 
 Проверки (`tests/default.nix`) работают на **фальшивых** архивах, которые
@@ -307,7 +335,11 @@ onec.lib.mkOnec pkgs {
 ```sh
 nix flake check      # распаковка, учебная версия, ошибка на отсутствующий
                      # компонент, профили зависимостей, модуль, запуск в FHS
+nix build .#module-vm-test -L   # модуль в NixOS-VM (QEMU, нужен KVM):
+                                # ragent/ras, перезапуск, /opt, лицензии
 ```
+
+В CI это два независимых задания (`flake-check` и `nixos-vm`).
 
 Проверке `fhs-run` нужны user namespaces внутри песочницы сборки (на NixOS
 есть по умолчанию; в GitHub Actions включаются в `ci.yml`).
@@ -339,7 +371,7 @@ webkitgtk, glibc и GTK.
 
 ## Лицензирование
 
-Исходный код проекта onec-nix распространяется под лицензией [MIT](LICENSE).
+Исходный код проекта 1C-Nix распространяется под лицензией [MIT](LICENSE).
 
 Проект не содержит и не распространяет компоненты платформы
 «1С:Предприятие». Программное обеспечение 1С является проприетарным и

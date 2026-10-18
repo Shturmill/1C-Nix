@@ -11,6 +11,7 @@
         inherit system;
         config.allowUnfree = true;
       };
+      tests = import ./tests { inherit pkgs nixpkgs self; };
     in
     {
       lib = {
@@ -51,7 +52,10 @@
         onec = ./modules/onec.nix;
       };
 
-      checks.${system} = import ./tests { inherit pkgs nixpkgs self; };
+      # NixOS-тест в QEMU тяжёлый — отдельно от быстрых проверок:
+      # nix build .#module-vm-test -L
+      checks.${system} = removeAttrs tests [ "module-vm" ];
+      packages.${system}.module-vm-test = tests.module-vm;
 
       formatter.${system} = pkgs.nixfmt;
     };
