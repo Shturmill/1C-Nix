@@ -460,15 +460,22 @@ in
       strict =
         pkgs.runCommandCC "onec-x11-fixes-strict"
           {
-            buildInputs = [ (pkgs.libx11 or pkgs.xorg.libX11) ];
+            buildInputs = [
+              (pkgs.libx11 or pkgs.xorg.libX11)
+              (pkgs.libxcb or pkgs.xorg.libxcb)
+            ];
           }
           ''
-            cc -O2 -Wall -Wextra -Werror -shared -fPIC -o "$out" ${../pkgs/onec/x11-fixes.c} -ldl -lpthread
+            cc -O2 -Wall -Wextra -Werror -shared -fPIC -fvisibility=hidden \
+              -o "$out" ${../pkgs/onec/x11-fixes.c}
           '';
       probe =
         pkgs.runCommandCC "onec-x11-fixes-test"
           {
-            buildInputs = [ (pkgs.libx11 or pkgs.xorg.libX11) ];
+            buildInputs = [
+              (pkgs.libx11 or pkgs.xorg.libX11)
+              (pkgs.libxcb or pkgs.xorg.libxcb)
+            ];
           }
           ''
             mkdir -p "$out/bin" "$out/lib"
@@ -482,7 +489,7 @@ in
       so = "${onecFromInstaller.x11Fixes}/lib/libonec-x11-fixes.so";
       steps = pkgs.writeShellScript "onec-x11-fixes-steps" ''
         set -eu
-        # check <ожидаемый override_redirect> <программа> <аргументы…> -- [переменные…]
+        # check <ожидаемый вывод> <программа> <аргументы…> -- [переменные…]
         check() {
           expect=$1 prog=$2
           shift 2
@@ -491,21 +498,52 @@ in
           shift
           got="$(env "$@" ${probe}/bin/$prog $args)"
           echo "$prog$args $*: $got"
-          [ "$got" = "override_redirect=$expect" ]
+          [ "$got" = "$expect" ]
         }
+        pre=LD_PRELOAD=${so}
+
+        # обход 3
         for call in map raised; do
-          check 1 1cv8c parent "$call" -- LD_PRELOAD=${so}
-          check 0 1cv8c normal "$call" -- LD_PRELOAD=${so}
-          check 0 1cv8c parent "$call" -- LD_PRELOAD=${so} ONEC_NO_X11_FIXES=1
-          check 1 1cv8c parent "$call" -- LD_PRELOAD=${so} ONEC_NO_X11_FIXES=0
-          check 0 1cv8c parent "$call" --
+          check override_redirect=1 1cv8c parent "$call" -- $pre
+          check override_redirect=0 1cv8c normal "$call" -- $pre
+          check override_redirect=0 1cv8c parent "$call" -- $pre ONEC_NO_X11_FIXES=1
+          check override_redirect=1 1cv8c parent "$call" -- $pre ONEC_NO_X11_FIXES=0
+          check override_redirect=0 1cv8c parent "$call" --
           # не процесс 1С
-          check 0 x11-fixes-test parent "$call" -- LD_PRELOAD=${so}
+          check override_redirect=0 x11-fixes-test parent "$call" -- $pre
           for scope in global local; do
-            check 1 1cv8 ${probe}/lib/libprobe.so $scope parent "$call" -- LD_PRELOAD=${so}
-            check 0 x11-fixes-dlopen ${probe}/lib/libprobe.so $scope parent "$call" -- LD_PRELOAD=${so}
+            check override_redirect=1 1cv8 ${probe}/lib/libprobe.so $scope parent "$call" -- $pre
+            check override_redirect=0 x11-fixes-dlopen ${probe}/lib/libprobe.so $scope parent "$call" -- $pre
           done
         done
+
+        # обход 1: перемещение со старым размером, затем настоящее событие;
+        # прежняя геометрия известна с показа окна
+        check "50,60 100x100 50,60 200x150" 1cv8c configure late -- $pre
+        check "50,60 200x150" 1cv8c configure late --
+        check "50,60 200x150" 1cv8c configure late -- $pre ONEC_NO_X11_FIXES=1
+        # WM успел до разбора MapNotify: размер в первой половине — прежний
+        check "50,60 100x100 50,60 200x150 70,80 200x150 70,80 300x200" \
+          1cv8c configure early -- $pre
+        check "50,60 200x150 70,80 300x200" 1cv8c configure early --
+        # события старше запомненной при показе геометрии с ней не сравниваются
+        check "50,60 200x150 70,80 200x150 70,80 300x200" 1cv8c configure premap -- $pre
+        check "50,60 200x150 70,80 300x200" 1cv8c configure premap --
+
+        # обход 2: только с ONEC_X11_FAST_CLOSE=1
+        fast="$pre ONEC_X11_FAST_CLOSE=1"
+        check "wait=hidden key=shown state=kept" 1cv8c close basic -- $fast
+        check "wait=shown key=shown state=kept" 1cv8c close basic -- $pre
+        # вопрос перед закрытием, короткое ожидание — окно остаётся
+        check "wait=shown key=shown state=kept" 1cv8c close dialog -- $fast
+        check "wait=shown key=shown state=kept" 1cv8c close short -- $fast
+        # окно спрятало само приложение (до или после нас) — по клавише не
+        # возвращается
+        check "wait=hidden key=hidden state=lost" 1cv8c close self -- $fast
+        check "wait=hidden key=hidden state=lost" 1cv8c close self-late -- $fast
+        # приложение само показало спрятанное окно — его _NET_WM_STATE не трогаем
+        check "wait=hidden key=shown state=lost" 1cv8c close remap -- $fast
+
         [ -e ${strict} ]
       '';
     in

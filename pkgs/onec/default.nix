@@ -157,17 +157,21 @@ let
     lib.unique (sets.common ++ lib.concatMap (p: sets.${p}) profiles);
 
   # Обходы дефектов окон 1С под X11 (серые полосы после fullscreen, долгое
-  # закрытие) — см. x11-fixes.c. Своих зависимостей нет: функции Xlib
-  # берутся из уже загруженной процессом libX11.
+  # закрытие) — см. x11-fixes.c. Своих зависимостей нет: функции Xlib и xcb
+  # берутся из уже загруженных процессом libX11 и libxcb (здесь — только
+  # заголовки).
   x11Fixes =
     runCommandCC "onec-x11-fixes"
       {
-        buildInputs = [ (pkgs.libx11 or pkgs.xorg.libX11) ];
+        buildInputs = [
+          (pkgs.libx11 or pkgs.xorg.libX11)
+          (pkgs.libxcb or pkgs.xorg.libxcb)
+        ];
       }
       ''
         mkdir -p "$out/lib"
-        cc -O2 -Wall -shared -fPIC \
-          -o "$out/lib/libonec-x11-fixes.so" ${./x11-fixes.c} -ldl -lpthread
+        cc -O2 -Wall -shared -fPIC -fvisibility=hidden \
+          -o "$out/lib/libonec-x11-fixes.so" ${./x11-fixes.c}
       '';
 
   # Точка входа FHS-окружения: первым аргументом — имя бинарника платформы.
