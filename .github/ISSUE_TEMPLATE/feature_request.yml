@@ -1,0 +1,53 @@
+name: Предложение улучшения
+description: Предложить новую возможность, улучшение совместимости или изменение существующего поведения.
+labels: [enhancement]
+body:
+  - type: dropdown
+    id: category
+    attributes:
+      label: Категория предложения
+      options:
+        - Поддержка новых версий 1С
+        - Графический клиент / Конфигуратор
+        - Сервер 1С / RAS
+        - Упаковка Nix
+        - Интеграция с NixOS
+        - Совместимость с Linux
+        - Тестирование / CI
+        - Документация
+        - Другое
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Какую проблему нужно решить?
+      description: Какое ограничение, неудобство или недостающая возможность мешает сейчас.
+      placeholder: "Например: нет способа запустить два кластера ragent на одной машине."
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Предлагаемое решение
+      description: Как это могло бы работать. Код и знание Nix не обязательны — достаточно описать идею.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Альтернативные решения
+      description: Какие ещё варианты вы рассматривали или используете сейчас.
+    validations:
+      required: false
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Дополнительная информация
+      description: Ссылки, примеры, скриншоты, похожие проекты.
+    validations:
+      required: false
